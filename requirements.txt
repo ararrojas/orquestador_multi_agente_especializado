@@ -1,0 +1,13 @@
+langgraph>=1.2
+langchain>=1.5
+langchain-anthropic>=1.7
+langchain-google-genai>=4.0
+langchain-tavily>=0.2
+python-dotenv>=1.0
+pydantic>=2.7
+# demo / notebook
+jupyter
+ipykernel
+
+# tests
+pytest>=8.0

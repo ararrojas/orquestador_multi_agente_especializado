@@ -1,0 +1,62 @@
+[
+  {
+    "id": "kb-001",
+    "title": "NovaPay – Informe trimestral Q1 2024",
+    "source": "informe_interno_q1_2024.pdf",
+    "content": "NovaPay, la app de pagos ficticia usada en las pre-entregas, cerró el Q1 2024 con 1.200.000 usuarios activos mensuales (MAU) y unos ingresos de 4,8 millones de euros. El coste de adquisición por cliente (CAC) fue de 18 euros y la tasa de abandono mensual (churn) del 3,1%."
+  },
+  {
+    "id": "kb-002",
+    "title": "NovaPay – Informe trimestral Q2 2024",
+    "source": "informe_interno_q2_2024.pdf",
+    "content": "En el Q2 2024 NovaPay alcanzó 1.380.000 usuarios activos mensuales y 5,6 millones de euros de ingresos. El CAC subió a 21 euros por la campaña de verano. El churn mensual bajó al 2,8% tras lanzar las notificaciones de gasto."
+  },
+  {
+    "id": "kb-003",
+    "title": "NovaPay – Informe trimestral Q3 2024",
+    "source": "informe_interno_q3_2024.pdf",
+    "content": "NovaPay terminó el Q3 2024 con 1.510.000 usuarios activos mensuales e ingresos de 6,1 millones de euros. El CAC se estabilizó en 19 euros. El churn mensual fue del 2,9%. La caída del servicio del 14 de agosto (6 horas) afectó a 300.000 usuarios."
+  },
+  {
+    "id": "kb-004",
+    "title": "NovaPay – Informe trimestral Q4 2024",
+    "source": "informe_interno_q4_2024.pdf",
+    "content": "En el Q4 2024 NovaPay llegó a 1.720.000 usuarios activos mensuales y 7,4 millones de euros de ingresos, impulsados por la campaña de Navidad y el lanzamiento de la tarjeta virtual. El CAC fue de 17 euros y el churn mensual del 2,5%."
+  },
+  {
+    "id": "kb-005",
+    "title": "Reseñas de usuarios en tiendas de apps – Q4 2024 (muestra)",
+    "source": "app_store_reviews_q4_2024.csv",
+    "content": "Reseña 1: 'La tarjeta virtual es excelente, rápida y muy fácil de usar.' Reseña 2: 'Me encanta la app, las notificaciones de gasto son útiles.' Reseña 3: 'El soporte es lento y tardaron una semana en responder, muy frustrante.' Reseña 4: 'Buena app pero las comisiones internacionales son caras.' Reseña 5: 'Increíble experiencia, la recomiendo a todos mis amigos.'"
+  },
+  {
+    "id": "kb-006",
+    "title": "Reseñas de usuarios en tiendas de apps – Q3 2024 (muestra)",
+    "source": "app_store_reviews_q3_2024.csv",
+    "content": "Reseña 1: 'La caída de agosto fue terrible, no pude pagar en el supermercado.' Reseña 2: 'App lenta y con errores después de la actualización.' Reseña 3: 'Buena idea pero el soporte es malo.' Reseña 4: 'Funciona bien para dividir gastos con amigos.' Reseña 5: 'Pésima comunicación durante la caída, muy decepcionado.'"
+  },
+  {
+    "id": "kb-007",
+    "title": "Benchmark de competidores – neobancos europeos 2024",
+    "source": "benchmark_competidores_2024.xlsx",
+    "content": "Según el benchmark interno, el churn mensual medio de los neobancos europeos comparables en 2024 fue del 2,7% y el CAC medio de 22 euros. La valoración media en tiendas de apps del sector fue de 4,3 sobre 5."
+  },
+  {
+    "id": "kb-008",
+    "title": "NovaPay – Valoraciones medias en tiendas de apps 2024",
+    "source": "ratings_2024.csv",
+    "content": "Valoración media de NovaPay en tiendas de apps por trimestre en 2024: Q1 4,2; Q2 4,3; Q3 3,7; Q4 4,4 (escala 1 a 5)."
+  },
+  {
+    "id": "kb-009",
+    "title": "Postmortem – caída del servicio de agosto 2024",
+    "source": "postmortem_2024_08_14.md",
+    "content": "El 14 de agosto de 2024 una migración de base de datos provocó 6 horas de indisponibilidad. Causa raíz: falta de pruebas de carga. Acciones: despliegues canary, página de estado pública y protocolo de comunicación en menos de 30 minutos."
+  },
+  {
+    "id": "kb-010",
+    "title": "Hoja de ruta de producto 2025",
+    "source": "roadmap_2025.md",
+    "content": "Prioridades 2025 de NovaPay: reducir las comisiones internacionales un 40%, chat de soporte con respuesta en menos de 2 horas, expansión a Portugal e Italia y objetivo de 2.500.000 usuarios activos mensuales a final de año."
+  }
+]
