@@ -1,5 +1,5 @@
 """API + worker + HITL sin red: Redis simulado (fakeredis), checkpointer en memoria y
-LLM guionizado. Los tests de integración con Redis real están en scripts/ (ver README)."""
+LLM guionizado. La prueba contra Redis y el LLM reales es scripts/load_test.py (ver README)."""
 
 import asyncio
 import warnings
@@ -7,6 +7,7 @@ import warnings
 import fakeredis
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app import hitl
@@ -30,11 +31,13 @@ def happy_llm():
 
 
 class BrokenLLM(ScriptedChatModel):
-    def with_structured_output(self, schema, **kwargs):
-        raise_ = lambda _: (_ for _ in ()).throw(RuntimeError("503 modelo saturado"))  # noqa: E731
-        from langchain_core.runnables import RunnableLambda
+    """Simula un proveedor caído: la primera llamada (el supervisor) lanza una excepción."""
 
-        return RunnableLambda(raise_)
+    def with_structured_output(self, schema, **kwargs):
+        def fail(_input):
+            raise RuntimeError("503 modelo saturado")
+
+        return RunnableLambda(fail)
 
 
 @pytest.fixture

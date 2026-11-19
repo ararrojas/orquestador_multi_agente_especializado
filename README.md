@@ -193,11 +193,16 @@ LangSmith como alternativa: deja `PHOENIX_COLLECTOR_ENDPOINT` vacío y define `L
 
 | Archivo | Contenido |
 |---|---|
-| `01_traces.png` | Lista de trazas de la corrida de 5 peticiones concurrentes |
-| `02_trace_detail.png` | Árbol de una traza: nodos del grafo, LLM y herramientas |
-| `03_hitl_session.png` | Sesión del job con HITL: ejecución pausada + reanudación |
-| `04_cost_per_execution.png` | Costo por ejecución (Traces/Sessions con columna Cost) |
-| `05_latency_p95.png` | Metrics → Trace latency con la P95 |
+| [`01_traces.png`](screenshots/01_traces.png) | Trazas `job.execute` de la corrida de 5 peticiones concurrentes (+ la prueba de rechazo) |
+| [`02_trace_detail.png`](screenshots/02_trace_detail.png) | Árbol de una traza: supervisor → researcher (agente ReAct, `ChatGoogleGenerativeAI`, `search_knowledge_base`)… con latencia, tokens y costo por span |
+| [`03_hitl_session.png`](screenshots/03_hitl_session.png) | Sesión del job con HITL: turno 1 termina en `AWAITING_APPROVAL` (razón `side_effect`), turno 2 es la reanudación tras aprobar |
+| [`04_cost_per_execution.png`](screenshots/04_cost_per_execution.png) | Columnas latency / total tokens / total cost de cada ejecución |
+| [`05_latency_p95.png`](screenshots/05_latency_p95.png) | Metrics → Trace latency: **p95 = 370,49 s** en la corrida concurrente; gráfico Cost con prompt/completion |
+| [`06_sessions.png`](screenshots/06_sessions.png) | Sesiones (una por job) con duración P50/P99 |
+
+**Resultado de la corrida** (Gemini `gemini-3.5-flash-lite`, `LLM_RPM=8`): 5/5 jobs en `DONE`, `POST /tasks` ≤ 12 ms, 63.832 tokens y **≈ $0,039 en total → ≈ $0,008 por ejecución** (entre $0,0067 y $0,0104), **p95 ≈ 370 s**. Phoenix redondea el costo de cada fila a `<$0.01`; el valor exacto está en el detalle de la traza o de la sesión.
+
+**Lectura del dashboard:** los nodos que más tokens consumen son `analyst` (~18 k) y `supervisor` (~19 k en 18 decisiones), porque reciben como contexto todas las aportaciones acumuladas; la entrada (prompt) pesa ~6 veces más que la salida. La latencia se concentra en `researcher` (~97 s por invocación) y `analyst` (~60 s): no es el modelo, sino la espera en el limitador de 8 peticiones/min que comparten los 5 jobs concurrentes.
 
 ## Tests
 
