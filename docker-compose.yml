@@ -1,0 +1,49 @@
+# docker compose up --build
+#   API      http://localhost:8000/docs
+#   Phoenix  http://localhost:6006
+#   Redis    localhost:6380 (puerto publicado distinto de 6379 para no chocar con otro Redis local)
+services:
+  redis:
+    image: redis:8            # incluye RedisJSON + RediSearch, que necesita RedisSaver
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["${REDIS_PORT:-6380}:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  phoenix:
+    image: arizephoenix/phoenix:version-21.2.1
+    ports: ["6006:6006", "4317:4317"]
+    volumes: [phoenix-data:/mnt/data]
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+      PHOENIX_ENABLE_AUTH: "false"       # desde v21 viene activada; en local la desactivamos
+      PHOENIX_TELEMETRY_ENABLED: "false"
+
+  api:
+    build: .
+    env_file: [{path: .env, required: false}]
+    environment: &common-env
+      REDIS_URL: redis://redis:6379/0
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+      WORKER_MODE: external
+      REPORTS_DIR: /code/reports
+    ports: ["${API_PORT:-8000}:8000"]
+    depends_on:
+      redis: {condition: service_healthy}
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file: [{path: .env, required: false}]
+    environment: *common-env
+    volumes: [./reports:/code/reports]   # los informes publicados aparecen en el host
+    depends_on:
+      redis: {condition: service_healthy}
+      phoenix: {condition: service_started}
+
+volumes:
+  redis-data:
+  phoenix-data:

@@ -1,163 +1,214 @@
-# Pre-entrega 6 · Orquestador multi-agente de análisis e investigación
+# Pre-entrega 7 · API de producción y monitoreo del orquestador multi-agente
 
-Prototipo en **LangGraph** de un sistema jerárquico: un **Supervisor** enruta la petición del usuario entre un **Agente Investigador** (búsqueda en fuentes) y un **Agente Analista** (cómputo), y después una fase de **síntesis** y un nodo de **validación** con rúbrica deciden si se entrega la respuesta o si hay que refinar.
+API REST asíncrona (FastAPI) que expone el orquestador multi-agente del Módulo 6
+(supervisor → investigador / analista → sintetizador → validador, en LangGraph) con:
 
-## Diagrama del grafo
+| Requisito | Implementación |
+|---|---|
+| **Endpoints asíncronos** | `POST /tasks` encola en Redis y responde `202` con `job_id` en ~15 ms; `GET /tasks/{id}` para polling. La API solo usa `redis.asyncio`: nunca ejecuta el grafo ni hace I/O síncrona en el event loop. |
+| **Worker** | Proceso separado (`python -m app.worker`) que consume la cola de Redis con concurrencia configurable (o `WORKER_MODE=inline` para correrlo dentro de la API). |
+| **Estado en Redis** | Estado del job en un hash `job:{id}` (`PENDING → RUNNING → AWAITING_APPROVAL → DONE / FAILED`) + checkpoints de LangGraph con `AsyncRedisSaver` (`thread_id = job_id`). |
+| **Manejo de errores** | Cualquier excepción o timeout del job en segundo plano se captura y el job pasa a `FAILED` con el error: el cliente nunca queda en un polling infinito. |
+| **Observabilidad** | Arize Phoenix vía OpenInference (cada nodo del grafo, llamada al LLM con tokens y herramienta es un span; el `job_id` es la sesión). LangSmith como alternativa por variables de entorno. |
+| **Human-in-the-loop** | Nodo `human_approval` con `interrupt()` que pausa las tareas **críticas** hasta `POST /tasks/{id}/approve`. |
 
-Generado con `graph.get_graph().draw_mermaid()` (`python main.py --diagram` → [`docs/graph.mmd`](docs/graph.mmd) y [`docs/graph.png`](docs/graph.png)).
+La documentación del orquestador del M6 (agentes, herramientas, guardas anti-bucle) está en [`docs/orquestador_m6.md`](docs/orquestador_m6.md).
+
+## Arquitectura
+
+```
+ cliente ──POST /tasks──▶ FastAPI ──RPUSH jobs:queue──▶ Redis ◀──BLPOP── worker (N jobs en paralelo)
+    ▲                       │  HSET job:{id} PENDING        ▲               │ graph.ainvoke(thread_id=job_id)
+    └──GET /tasks/{id}──────┘                               │               │ AsyncRedisSaver (checkpoints)
+                                                            └── estado ─────┘ OpenInference ──▶ Phoenix :6006
+```
+
+### Grafo de producción
 
 ```mermaid
 graph TD;
-	__start__([<p>__start__</p>]):::first
-	supervisor(supervisor)
-	researcher(researcher)
-	analyst(analyst)
-	synthesizer(synthesizer)
-	validator(validator)
-	__end__([<p>__end__</p>]):::last
-	__start__ --> supervisor;
-	analyst --> supervisor;
-	researcher --> supervisor;
-	supervisor -.-> analyst;
+	__start__([start]) --> supervisor;
 	supervisor -.-> researcher;
+	supervisor -.-> analyst;
 	supervisor -.-> synthesizer;
+	researcher --> supervisor;
+	analyst --> supervisor;
 	synthesizer --> validator;
-	validator -.-> __end__;
-	validator -.-> supervisor;
-	classDef default fill:#f2f0ff,line-height:1.2
-	classDef first fill-opacity:0
-	classDef last fill:#bfb6fc
+	validator -.->|refinar| supervisor;
+	validator -.->|done| risk_gate;
+	risk_gate -.->|no crítica| __end__([end]);
+	risk_gate -.->|crítica| human_approval;
+	human_approval -.->|aprobado + publicar| publish_report;
+	human_approval -.->|aprobado / rechazado| __end__;
+	publish_report --> __end__;
+	style human_approval fill:#ffd9a8
+	style publish_report fill:#ffb3b3
 ```
 
-Líneas punteadas = aristas condicionales (`add_conditional_edges` con funciones que devuelven `Literal[...]`).
+(Generado desde el grafo compilado en [`docs/graph_api.mmd`](docs/graph_api.mmd) / [`docs/graph_api.png`](docs/graph_api.png).)
 
-## Estructura del repositorio
+### Human-in-the-loop: ¿qué es una tarea crítica?
+
+`risk_gate` (determinista, sin LLM) marca la tarea como crítica si se cumple alguna de estas condiciones:
+
+| Razón | Cuándo |
+|---|---|
+| `side_effect` | La petición implica la herramienta `publish_report`, que escribe el informe en `reports/` (efecto secundario fuera del sistema). Se detecta en la pregunta (“publica”, “envía”, “comparte”…) o con `"publish": true`. |
+| `high_cost` | La ejecución consumió más de `HITL_TOKEN_THRESHOLD` tokens (contados con `UsageMetadataCallbackHandler`). |
+| `low_quality` | El validador cerró por límite de revisiones sin aprobar. |
+| `requested` | El cliente envió `"require_approval": true`. |
+
+Si es crítica, `human_approval` llama a `interrupt()`: el estado queda en los checkpoints de Redis, el job pasa a `AWAITING_APPROVAL` y `GET /tasks/{id}` muestra las razones y el borrador. La aprobación puede llegar mucho después y la procesa cualquier worker (el estado no vive en memoria). Al aprobar se reanuda con `Command(resume=...)`; si se rechaza, la respuesta se retiene y `publish_report` **no** se ejecuta.
+
+## Estructura
 
 ```
-├── state.py                 # OrchestratorState (hereda de MessagesState) + Contribution
-├── graph.py                 # StateGraph: nodos, aristas condicionales, build_graph()
-├── main.py                  # CLI: ejecuta y muestra el flujo de delegación; --diagram
-├── config.py                # límites: MAX_STEPS, MAX_REVISIONS, MAX_CALLS_PER_AGENT
-├── llm.py                   # fábrica de modelos (init_chat_model, configurable por env)
-├── agents/
-│   ├── research_agent.py    # create_react_agent + herramientas de búsqueda
-│   ├── analyst_agent.py     # create_react_agent + herramientas de cómputo
-│   ├── supervisor.py        # router con salida estructurada + guardas deterministas
-│   ├── synthesizer.py       # síntesis final
-│   ├── validator.py         # rúbrica de validación antes de END
-│   ├── requirements.py      # qué herramienta exige cada tipo de pregunta (p. ej. sentimiento)
-│   └── _specialist.py       # aislamiento de contexto + trazabilidad común
-├── tools/
-│   ├── search_tools.py      # search_knowledge_base (TF-IDF, Vector DB simulada) + Tavily opcional
-│   └── analysis_tools.py    # calculator, growth_rate, descriptive_stats, sentiment_analysis
-├── data/knowledge_base.json # corpus de la empresa ficticia "NovaPay" (informes, reseñas, benchmark)
-├── demo.ipynb               # demo del flujo de delegación
-└── tests/                   # tests de herramientas y del grafo completo con un LLM guionizado
+├── app/
+│   ├── main.py            # FastAPI: POST /tasks · GET /tasks/{id} · GET /tasks · GET /health
+│   ├── graph.py           # orquestador M6 + risk_gate/HITL + AsyncRedisSaver
+│   ├── worker.py          # consume la cola, ejecuta el grafo, PENDING/RUNNING/AWAITING_APPROVAL/DONE/FAILED
+│   ├── store.py           # estado de los jobs y cola en Redis (redis.asyncio)
+│   ├── observability.py   # Phoenix (OpenInference) / LangSmith, decorador @traced, conteo de tokens
+│   └── hitl.py            # risk_gate, human_approval (interrupt), publish_report, POST /tasks/{id}/approve
+├── agents/ tools/ state.py graph.py llm.py config.py   # orquestador del Módulo 6 (sin cambios de lógica)
+├── scripts/load_test.py   # 5 peticiones concurrentes + polling + p50/p95 del lado cliente
+├── tests/                 # tests offline (LLM guionizado + fakeredis): API, HITL, FAILED, grafo M6
+├── screenshots/           # capturas de Phoenix (trazas, costo por ejecución, latencia p95)
+├── docker-compose.yml     # redis:8 + phoenix + api + worker
+├── Dockerfile
+├── requirements.txt
+└── .env.example
 ```
 
-## Instalación y uso
+## Cómo levantarlo
 
-Requiere Python ≥ 3.10.
+Requiere Python 3.12+ y Docker (para Redis 8 y Phoenix).
 
 ```bash
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # rellena GOOGLE_API_KEY (o ANTHROPIC_API_KEY); TAVILY_API_KEY es opcional
+cp .env.example .env    # rellena GOOGLE_API_KEY (o ANTHROPIC_API_KEY + LLM_MODEL)
+```
+
+### Opción A · Todo con Docker Compose (recomendado)
+
+```bash
+docker compose up --build
+```
+
+- API + Swagger: http://localhost:8000/docs
+- Phoenix: http://localhost:6006
+- Redis: `localhost:6380` (publicado en 6380 para no chocar con otro Redis local)
+
+Si los puertos 8000 o 6380 están ocupados: `API_PORT=8010 REDIS_PORT=6390 docker compose up --build`.
+
+### Opción B · Redis y Phoenix en Docker, API y worker en local
+
+```bash
+docker compose up -d redis phoenix
 ```
 
 ```bash
-python main.py                                  # pregunta de demo
-python main.py "¿Cómo evolucionó el churn de NovaPay frente al sector?"
-python main.py --diagram                        # regenera docs/graph.mmd y docs/graph.png
-pytest -q                                       # tests sin red ni API key
+python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 ```
 
-El proveedor se elige con `LLM_MODEL` (cualquier `proveedor:modelo` que acepte `init_chat_model`):
-
-| Proveedor | `.env` |
-|---|---|
-| Gemini (free tier) | `GOOGLE_API_KEY=...`, `LLM_MODEL=google_genai:gemini-3.5-flash-lite`, `LLM_RPM=8` |
-| Claude | `ANTHROPIC_API_KEY=...`, `LLM_MODEL=anthropic:claude-opus-5-5` |
-
-`LLM_RPM` activa un `InMemoryRateLimiter` para no superar la cuota por minuto del free tier (una ejecución hace ~10-15 llamadas al LLM).
-
-## Componentes
-
-### Estado compartido (`state.py`)
-
-`OrchestratorState` hereda de `MessagesState` y añade:
-
-| Campo | Para qué sirve |
-|---|---|
-| `next_agent`, `current_instruction`, `supervisor_reasoning` | Decisión del supervisor: a quién, qué debe hacer y por qué (auditable). |
-| `contributions: Annotated[list[Contribution], operator.add]` | Registro *append-only* de **qué agente aportó qué**: agente, paso, instrucción recibida, salida y herramientas usadas. |
-| `agent_calls: Annotated[dict, merge_counts]` | Contador de invocaciones por especialista (reducer que suma). |
-| `step_count`, `revision_count` | Contadores para las condiciones de parada. |
-| `draft_answer`, `validation_feedback`, `task_completed`, `final_answer` | Síntesis y ciclo de validación. |
-
-Los reducers hacen que las aportaciones nunca se sobrescriban: aunque un agente intervenga varias veces, todo queda trazado.
-
-### Especialistas (`agents/`)
-
-Ambos se construyen con `create_react_agent` y **herramientas acotadas a su rol**:
-
-- **Investigador** → `search_knowledge_base` (búsqueda TF-IDF + coseno sobre `data/knowledge_base.json`, que simula la Vector DB de pre-entregas anteriores) y `web_search` (Tavily) si existe `TAVILY_API_KEY`. No puede calcular.
-- **Analista** → `calculator` (evaluador AST seguro, sin `eval`), `growth_rate` (variación por periodo, total y compuesta), `descriptive_stats` y `sentiment_analysis` (léxico ES/EN con negaciones e intensificadores). No puede buscar. Todos los números salen de código determinista, no del LLM.
-
-### Supervisor (`agents/supervisor.py`)
-
-Usa `with_structured_output(SupervisorDecision)` donde `next_agent: Literal["researcher", "analyst", "synthesizer"]`, de modo que la respuesta se mapea directamente a nombres de nodo. Su prompt contiene una **rúbrica de suficiencia** (cada parte de la pregunta con datos citados, toda cifra derivada calculada por el analista, sin contradicciones, feedback del validador atendido).
-
-### Síntesis y validación
-
-`synthesizer` redacta la respuesta usando solo las aportaciones. `validator` puntúa el borrador con una rúbrica de 5 criterios (cobertura, trazabilidad de cifras, citas, ausencia de contradicciones y **métodos adecuados**). El quinto criterio se refuerza con una comprobación determinista (`agents/requirements.py`): si la pregunta pide sentimiento y el analista no ejecutó `sentiment_analysis` sobre los textos de las reseñas, el borrador se rechaza aunque el LLM lo apruebe. Una métrica parecida, como la valoración en estrellas, no sustituye al análisis pedido. Si falla, vuelve al supervisor con feedback dirigido al agente responsable; si aprueba, `END`.
-
-## ¿Por qué esta topología?
-
-- **Jerárquica con supervisor central** en lugar de una red donde los agentes se hablan entre sí: un único punto de decisión hace el flujo predecible, auditable (`supervisor_reasoning` en cada paso) y fácil de limitar. Con dos especialistas no compensa la complejidad de una red.
-- **Especialistas en estrella que siempre vuelven al supervisor**: el supervisor ve cada resultado antes de decidir el siguiente paso, lo que permite pedir datos que faltan o recalcular.
-- **Síntesis y validación como nodos separados** del supervisor: separar *quién decide el siguiente paso* de *quién juzga la calidad final* evita que el mismo prompt se apruebe a sí mismo y permite un bucle de refinamiento explícito.
-
-## Manejo de conflictos y de bucles
-
-**Conflictos entre agentes**
-
-1. *Separación de responsabilidades por herramientas*: el investigador no puede calcular y el analista no puede buscar, así que no pueden "pisarse" con versiones distintas del mismo dato.
-2. *Jerarquía de verdad*: el supervisor tiene instrucción explícita de que los **datos fuente del investigador mandan** sobre la interpretación; ante una discrepancia pide al analista recalcular con esos datos.
-3. *Trazabilidad*: cada cifra de la respuesta debe poder rastrearse a una `Contribution`; el validador lo comprueba (`figures_traceable`) y devuelve el trabajo al agente responsable (`agent_to_refine`).
-
-**"Supervisor infinito"** — tres guardas deterministas en código, independientes del LLM:
-
-| Guarda | Efecto |
-|---|---|
-| `MAX_STEPS` (8) | Al agotarse, el supervisor fuerza `synthesizer` y declara lagunas. |
-| `MAX_CALLS_PER_AGENT` (3) | Si el LLM pide de nuevo a un agente saturado, se fuerza la síntesis. |
-| `MAX_REVISIONS` (2) | El validador cierra con un aviso aunque no apruebe. |
-
-Además, una **guarda de suficiencia** impide sintetizar sin que ambos dominios hayan aportado, y cada agente ReAct interno tiene `recursion_limit` propio.
-
-**Contaminación de contexto** — los especialistas **no reciben el historial global**. Cada uno arranca un hilo ReAct nuevo con solo:
-- Investigador: pregunta original + instrucción del supervisor (+ feedback si es una revisión).
-- Analista: instrucción + aportaciones del investigador.
-
-Al canal `messages` global solo sube la salida final de cada agente, etiquetada con `name=<agente>`; los pasos intermedios de herramientas se quedan dentro del subagente.
-
-## Demo
-
-[`demo.ipynb`](demo.ipynb) muestra el diagrama, la ejecución real con la pregunta de demo (requiere API key) y la tabla de aportaciones por agente. La última sección ejecuta el mismo grafo con un LLM guionizado (herramientas reales) que incluye un rechazo del validador y una ronda de refinamiento:
-
-```
-🧭 supervisor (paso 1) → researcher
-🔎 researcher usó ['search_knowledge_base']
-🧭 supervisor (paso 2) → analyst
-📊 analyst usó ['growth_rate']
-🧭 supervisor (paso 3) → synthesizer
-📝 synthesizer: borrador generado
-✅ [validator] RECHAZADO (para analyst) Falta el análisis de sentimiento.
-🧭 supervisor (paso 4) → analyst
-📊 analyst usó ['sentiment_analysis']
-🧭 supervisor (paso 5) → synthesizer
-✅ [validator] APROBADO
+```bash
+uvicorn app.main:app --port 8000
 ```
 
-> Nota: los datos de `data/knowledge_base.json` corresponden a una empresa **ficticia** (NovaPay) creada para el ejercicio.
+En otra terminal:
+
+```bash
+python -m app.worker
+```
+
+(O un solo proceso con `WORKER_MODE=inline uvicorn app.main:app`.)
+
+> Redis tiene que ser **Redis 8 o Redis Stack**: `AsyncRedisSaver` usa los módulos RedisJSON y RediSearch. Un `redis:7` normal falla al crear los índices.
+
+## Uso de la API
+
+```bash
+curl -s -X POST localhost:8000/tasks -H 'content-type: application/json' \
+  -d '{"question": "¿Cuánto crecieron los usuarios activos de NovaPay entre Q1 y Q4 de 2024?"}'
+# {"job_id":"9f0c…","status":"PENDING","status_url":"/tasks/9f0c…"}
+```
+
+```bash
+curl -s localhost:8000/tasks/<job_id>
+```
+
+Tarea crítica (efecto secundario) → se pausa para aprobación:
+
+```bash
+curl -s -X POST localhost:8000/tasks -H 'content-type: application/json' \
+  -d '{"question": "Analiza el crecimiento de ingresos de NovaPay en 2024 y publica el informe"}'
+# … GET /tasks/<job_id> → "status": "AWAITING_APPROVAL", "interrupt": {"reasons": ["side_effect: …"], "draft": "…"}
+```
+
+```bash
+curl -s -X POST localhost:8000/tasks/<job_id>/approve -H 'content-type: application/json' \
+  -d '{"approved": true, "reviewer": "ara", "comment": "ok"}'
+# → el worker reanuda el grafo, ejecuta publish_report y el job pasa a DONE con "published_to": "reports/<job_id>.md"
+```
+
+Ejemplo de respuesta de `GET /tasks/{id}` al terminar:
+
+```json
+{
+  "job_id": "…", "status": "DONE", "question": "…",
+  "result": "…respuesta final…",
+  "critical_reasons": ["side_effect: la tarea ejecuta publish_report (escribe/distribuye el informe)"],
+  "approval": {"approved": true, "reviewer": "ara", "comment": "ok", "decided_at": "…"},
+  "published_to": "reports/….md",
+  "agent_calls": {"researcher": 1, "analyst": 2}, "step_count": 5, "revision_count": 1,
+  "tokens_total": 41235, "duration_s": 74.2
+}
+```
+
+Si el agente falla (cuota del proveedor, timeout de `JOB_TIMEOUT_S`, error de herramienta…), el job queda en `"status": "FAILED"` con `"error"`.
+
+## Prueba de carga: 5 peticiones concurrentes
+
+Con la API y el worker levantados:
+
+```bash
+python scripts/load_test.py --url http://localhost:8000
+```
+
+Lanza 5 preguntas distintas a la vez (la última pide publicar el informe → pasa por HITL y el script la aprueba automáticamente; `--no-approve` la deja esperando para aprobarla a mano), hace polling hasta que terminan e imprime por job el estado, la latencia, los tokens y si pasó por HITL, más p50/p95 del lado del cliente como referencia.
+
+> Con el free tier de Gemini (`LLM_RPM=8`) las 5 ejecuciones comparten el limitador del worker y la corrida tarda varios minutos. Es lo esperado.
+
+## Observabilidad y capturas
+
+Phoenix (http://localhost:6006) → proyecto **`pre7-multiagente`**:
+
+- **Trazas**: cada ejecución de un job es una traza con raíz `job.execute` y, debajo, cada nodo (`supervisor`, `researcher`, `analyst`, `synthesizer`, `validator`, `risk_gate`, `human_approval`, `publish_report`), cada llamada al LLM con tokens de entrada/salida y cada herramienta. La ejecución inicial y la reanudación tras la aprobación comparten `session.id = job_id` (pestaña **Sessions**).
+- **Costo por ejecución**: Phoenix lo calcula solo a partir de los tokens y el modelo de cada span LLM. Columna *Cost* en **Traces**, total por job en **Sessions** y gráfico *Cost* en **Metrics**. Si el costo sale en $0 con tokens > 0, el modelo no está en la tabla de precios de Phoenix: agregá su precio en *Settings* (configuración de modelos/precios).
+- **Latencia p95**: pestaña **Metrics** → gráfico *Trace latency* (percentiles P50/P75/P90/**P95**/P99).
+- **Lectura del dashboard**: ordená los spans LLM por tokens para ver qué nodo consume más, y abrí la traza más lenta para ver dónde se concentra la latencia.
+
+LangSmith como alternativa: deja `PHOENIX_COLLECTOR_ENDPOINT` vacío y define `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY` y `LANGSMITH_PROJECT`.
+
+### Capturas (`/screenshots`)
+
+| Archivo | Contenido |
+|---|---|
+| `01_traces.png` | Lista de trazas de la corrida de 5 peticiones concurrentes |
+| `02_trace_detail.png` | Árbol de una traza: nodos del grafo, LLM y herramientas |
+| `03_hitl_session.png` | Sesión del job con HITL: ejecución pausada + reanudación |
+| `04_cost_per_execution.png` | Costo por ejecución (Traces/Sessions con columna Cost) |
+| `05_latency_p95.png` | Metrics → Trace latency con la P95 |
+
+## Tests
+
+```bash
+pytest -q
+```
+
+Sin red ni API key: un LLM guionizado ejecuta el grafo con las herramientas reales y `fakeredis` reemplaza a Redis. Cubren que `POST /tasks` responde sin ejecutar el grafo, el paso a `DONE`, el paso a `FAILED` cuando el LLM lanza una excepción en segundo plano, la pausa HITL (la herramienta con efectos secundarios no se ejecuta antes de aprobar), la aprobación (`publish_report` escribe el informe), el rechazo, y el `409` ante una doble aprobación. Además se probó contra `redis:8` real con `AsyncRedisSaver`: un job pausado se reanuda desde un checkpointer nuevo, como si el worker se hubiera reiniciado.
+
+## Variables de entorno
+
+Ver [`.env.example`](.env.example). Las principales: `REDIS_URL`, `WORKER_MODE`, `WORKER_CONCURRENCY`, `JOB_TIMEOUT_S`, `HITL_TOKEN_THRESHOLD`, `PHOENIX_COLLECTOR_ENDPOINT`, `PHOENIX_PROJECT_NAME`, `LLM_MODEL`, `LLM_RPM`.
+
+> Los datos de `data/knowledge_base.json` corresponden a una empresa ficticia (NovaPay) creada para el ejercicio.

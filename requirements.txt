@@ -1,3 +1,4 @@
+# --- Orquestador multi-agente (M6) ---
 langgraph>=1.2
 langchain>=1.5
 langchain-anthropic>=1.7
@@ -5,9 +6,21 @@ langchain-google-genai>=4.0
 langchain-tavily>=0.2
 python-dotenv>=1.0
 pydantic>=2.7
-# demo / notebook
+
+# --- API de producción (Pre-entrega 7) ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+redis>=5.0
+langgraph-checkpoint-redis>=0.6     # AsyncRedisSaver (requiere Redis 8 o Redis Stack)
+httpx>=0.27                         # cliente de la prueba de carga
+
+# --- Observabilidad ---
+arize-phoenix-otel>=0.10
+openinference-instrumentation-langchain>=0.1.40
+# LangSmith (alternativa) viene con langchain-core: basta con las variables LANGSMITH_*
+
+# --- tests / demo ---
+pytest>=8.0
+fakeredis>=2.26
 jupyter
 ipykernel
-
-# tests
-pytest>=8.0
